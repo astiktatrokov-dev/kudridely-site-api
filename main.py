@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -172,12 +173,27 @@ async def create_inquiry(payload: InquiryPayload):
         lines.append(f"💬 Комментарий: {escape(payload.comment.strip())}")
     message = "\n".join(lines)
 
-    notified = True
-    for admin_id in app.state.admin_ids:
+    async def notify_admin(admin_id: int) -> bool:
         try:
-            await app.state.bot.send_message(admin_id, message)
+            # Bound Telegram I/O so a slow Telegram connection can never keep
+            # the website's submit button spinning indefinitely.
+            await asyncio.wait_for(
+                app.state.bot.send_message(admin_id, message),
+                timeout=8.0,
+            )
+            return True
+        except asyncio.TimeoutError:
+            logger.error("Telegram notification timed out for inquiry %s", inquiry_id)
+            return False
         except Exception:
-            notified = False
-            logger.exception("Inquiry %s was saved but notification to admin failed", inquiry_id)
+            logger.exception("Inquiry %s was saved but notification to admin %s failed", inquiry_id, admin_id)
+            return False
 
+    results = await asyncio.gather(
+        *(notify_admin(admin_id) for admin_id in app.state.admin_ids),
+        return_exceptions=True,
+    )
+    notified = bool(results) and all(result is True for result in results)
+
+    # Return the saved inquiry even if Telegram is temporarily unavailable.
     return {"ok": True, "id": inquiry_id, "notified": notified}
